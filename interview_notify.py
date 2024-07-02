@@ -6,6 +6,7 @@ from time import sleep
 from file_read_backwards import FileReadBackwards
 from hashlib import sha256
 from urllib.parse import urljoin
+import os
 
 VERSION = '1.2.10'
 default_server = 'https://ntfy.sh/'
@@ -29,149 +30,166 @@ parser.add_argument('--bot-nicks', metavar='NICKS', default='Gatekeeper', help='
 parser.add_argument('--mode', choices=['red', 'ops'], default='red', help='interview mode (affects triggers) – default: red')
 parser.add_argument('-v', action='count', default=5, dest='verbose', help='verbose (invoke multiple times for more verbosity)')
 parser.add_argument('--version', action='version', version='{} v{}'.format(parser.prog, VERSION))
+parser.add_argument('--textual', default=False, dest='textual', action=argparse.BooleanOptionalAction, help="If using textual irc set to true to enable alternative file discovery")
+
 
 def log_scan():
-  """Poll dir for most recently modified log file and spawn a parser thread for the log"""
-  logging.info('scanner: watching logs in "{}"'.format(args.path))
-  curr = find_latest_log()
-  logging.debug('scanner: current log: "{}"'.format(curr.name))
-  parser, parser_stop = spawn_parser(curr)
-  parser.start()
-  while True:
-    sleep(0.5) # polling delay for checking for newer logfile
-    latest = find_latest_log()
-    if curr != latest:
-      curr = latest
-      logging.info('scanner: newer log found: "{}"'.format(curr.name))
-      parser_stop.set()
-      parser.join()
-      parser, parser_stop = spawn_parser(curr)
-      parser.start()
+    """Poll dir for most recently modified log file and spawn a parser thread for the log"""
+    logging.info('scanner: watching logs in "{}"'.format(args.path))
+    curr = find_latest_log()
+    logging.debug('scanner: current log: "{}"'.format(curr.name))
+    parser, parser_stop = spawn_parser(curr)
+    parser.start()
+    while True:
+        sleep(0.5)  # polling delay for checking for newer logfile
+        latest = find_latest_log()
+        if curr != latest:
+            curr = latest
+            logging.info('scanner: newer log found: "{}"'.format(curr.name))
+            parser_stop.set()
+            parser.join()
+            parser, parser_stop = spawn_parser(curr)
+            parser.start()
+
 
 def find_latest_log():
   """Find latest log file"""
-  files = [f for f in args.path.iterdir() if f.is_file() and f.name not in ['.DS_Store', 'thumbs.db']]
+  if not args.textual:
+    files = [f for f in args.path.iterdir() if f.is_file() and f.name not in ['.DS_Store', 'thumbs.db']]
+  else:
+    files = [file for file in args.path.rglob('*.txt')]
   if len(files) == 0:
     crit_quit('no log files found')
   return max(files, key=lambda f: f.stat().st_mtime)
 
+
 def spawn_parser(log_path):
-  """Spawn new parser thread"""
-  logging.debug('spawning new parser')
-  parser_stop = threading.Event()
-  thread = threading.Thread(target=log_parse, args=(log_path, parser_stop))
-  return thread, parser_stop
+    """Spawn new parser thread"""
+    logging.debug('spawning new parser')
+    parser_stop = threading.Event()
+    thread = threading.Thread(target=log_parse, args=(log_path, parser_stop))
+    return thread, parser_stop
+
 
 def log_parse(log_path, parser_stop):
-  """Parse log file and notify on triggers (parser thread)"""
-  logging.info('parser: using "{}"'.format(log_path.name))
-  for line in tail(log_path, parser_stop):
-    logging.debug(line)
-    if check_trigger(line, 'Currently interviewing: {}'.format(args.nick)):
-      logging.info('YOUR INTERVIEW IS HAPPENING ❗')
-      notify(line, title='Your interview is happening❗', tags='rotating_light', priority=5)
-    elif check_trigger(line, 'Currently interviewing:'):
-      logging.info('interview detected ⚠️')
-      notify(line, title='Interview detected', tags='warning')
-    elif check_trigger(line, '{}:'.format(args.nick), disregard_bot_nicks=True):
-      logging.info('mention detected ⚠️')
-      notify(line, title="You've been mentioned", tags='wave')
-    elif check_words(line, triggers=['quit', 'disconnect', 'part', 'left', 'leave']):
-      logging.info('netsplit detected ⚠️')
-      notify(line, title="Netsplit detected – requeue within 10min!", tags='electric_plug', priority=5)
-    elif check_words(line, triggers=['kick'], check_nick=True):
-      logging.info('kick detected ⚠️')
-      notify(line, title="You've been kicked – rejoin & requeue ASAP!", tags='anger', priority=5)
+    """Parse log file and notify on triggers (parser thread)"""
+    logging.info('parser: using "{}"'.format(log_path.name))
+    for line in tail(log_path, parser_stop):
+        logging.debug(line)
+        if check_trigger(line, 'Currently interviewing: {}'.format(args.nick)):
+            logging.info('YOUR INTERVIEW IS HAPPENING ❗')
+            notify(line, title='Your interview is happening❗', tags='rotating_light', priority=5)
+        elif check_trigger(line, 'Currently interviewing:'):
+            logging.info('interview detected ⚠️')
+            notify(line, title='Interview detected', tags='warning')
+        elif check_trigger(line, '{}:'.format(args.nick), disregard_bot_nicks=True):
+            logging.info('mention detected ⚠️')
+            notify(line, title="You've been mentioned", tags='wave')
+        elif check_words(line, triggers=['quit', 'disconnect', 'part', 'left', 'leave']):
+            logging.info('netsplit detected ⚠️')
+            notify(line, title="Netsplit detected – requeue within 10min!", tags='electric_plug', priority=5)
+        elif check_words(line, triggers=['kick'], check_nick=True):
+            logging.info('kick detected ⚠️')
+            notify(line, title="You've been kicked – rejoin & requeue ASAP!", tags='anger', priority=5)
+
 
 def tail(path, parser_stop):
-  """Poll file and yield lines as they appear"""
-  with FileReadBackwards(path) as f:
-    last_line = f.readline()
-    if last_line:
-      yield last_line
-  with open(path) as f:
-    f.seek(0, 2) # os.SEEK_END
-    while not parser_stop.is_set():
-      line = f.readline()
-      if not line:
-        sleep(0.1) # polling delay for checking for new lines
-        continue
-      yield line
+    """Poll file and yield lines as they appear"""
+    with FileReadBackwards(path) as f:
+        last_line = f.readline()
+        if last_line:
+            yield last_line
+    with open(path) as f:
+        f.seek(0, 2)  # os.SEEK_END
+        while not parser_stop.is_set():
+            line = f.readline()
+            if not line:
+                sleep(0.1)  # polling delay for checking for new lines
+                continue
+            yield line
+
 
 def check_trigger(line, trigger, disregard_bot_nicks=False):
-  """Check for a trigger in a line"""
-  if disregard_bot_nicks or not args.check_bot_nicks:
-    return trigger in remove_html_tags(line)
-  else:
-    triggers = bot_nick_prefix(trigger)
-    return any(trigger in line for trigger in triggers)
+    """Check for a trigger in a line"""
+    if disregard_bot_nicks or not args.check_bot_nicks:
+        return trigger in remove_html_tags(line)
+    else:
+        triggers = bot_nick_prefix(trigger)
+        return any(trigger in line for trigger in triggers)
+
 
 def check_words(line, triggers, check_nick=False):
-  """Check if a trigger & a bot nick & (optionally) user nick all appear in a string"""
-  for trigger in triggers:
-    for bot in args.bot_nicks.split(','):
-      if check_nick:
-        if args.nick in line and bot in line and trigger.lower() in line.lower():
-          return True
-      else:
-        if bot in line and trigger.lower() in line.lower():
-          return True
-  return False
+    """Check if a trigger & a bot nick & (optionally) user nick all appear in a string"""
+    for trigger in triggers:
+        for bot in args.bot_nicks.split(','):
+            if check_nick:
+                if args.nick in line and bot in line and trigger.lower() in line.lower():
+                    return True
+            else:
+                if bot in line and trigger.lower() in line.lower():
+                    return True
+    return False
+
 
 def remove_html_tags(text):
-  """Remove html tags from a string"""
-  clean = re.compile('<.*?>')
-  return re.sub(clean, '', text)
+    """Remove html tags from a string"""
+    clean = re.compile('<.*?>')
+    return re.sub(clean, '', text)
+
 
 def bot_nick_prefix(trigger):
-  """Prefix a trigger with bot nick(s) to reduce false positives"""
-  nicks = args.bot_nicks.split(',')
-  return ['{}> {}'.format(nick, trigger) for nick in nicks]
+    """Prefix a trigger with bot nick(s) to reduce false positives"""
+    nicks = args.bot_nicks.split(',')
+    return ['{}> {}'.format(nick, trigger) for nick in nicks]
+
 
 def notify(data, topic=None, server=None, **kwargs):
-  """Send notification via ntfy"""
-  if topic is None: topic=args.topic
-  if server is None: server=args.server
-  if server[-1] != '/': server += '/'
-  target = urljoin(server, topic, allow_fragments=False)
-  headers = {k.capitalize():str(v).encode('utf-8') for (k,v) in kwargs.items()}
-  requests.post(target,
-                data=data.encode(encoding='utf-8'),
-                headers=headers)
+    """Send notification via ntfy"""
+    if topic is None: topic = args.topic
+    if server is None: server = args.server
+    if server[-1] != '/': server += '/'
+    target = urljoin(server, topic, allow_fragments=False)
+    headers = {k.capitalize(): str(v).encode('utf-8') for (k, v) in kwargs.items()}
+    requests.post(target,
+                  data=data.encode(encoding='utf-8'),
+                  headers=headers)
+
 
 def anon_telemetry():
-  """Send anonymous telemetry
+    """Send anonymous telemetry
 
   Why? I won't bother working on it if I don't see people using it!
   I can't get your nick or IP or anything.
 
   sends: anon id based on nick, script mode, script version
   """
-  seed = 'H6IhIkah11ee1AxnDKClsujZ6gX9zHf8'
-  nick_sha = sha256(args.nick.encode('utf-8')).hexdigest()
-  anon_id = sha256('{}{}'.format(nick_sha, seed).encode('utf-8')).hexdigest()
-  notify('anon_id={}, mode={}, version={}'.format(anon_id, args.mode, VERSION),
-          server=default_server,
-          title='Anonymous Telemetry', topic='interview-notify-telemetry', tags='telephone_receiver')
+    seed = 'H6IhIkah11ee1AxnDKClsujZ6gX9zHf8'
+    nick_sha = sha256(args.nick.encode('utf-8')).hexdigest()
+    anon_id = sha256('{}{}'.format(nick_sha, seed).encode('utf-8')).hexdigest()
+    notify('anon_id={}, mode={}, version={}'.format(anon_id, args.mode, VERSION),
+           server=default_server,
+           title='Anonymous Telemetry', topic='interview-notify-telemetry', tags='telephone_receiver')
+
 
 def crit_quit(msg):
-  logging.critical(msg)
-  sys.exit()
+    logging.critical(msg)
+    sys.exit()
+
 
 # ----------
 
 args = parser.parse_args()
 
-args.verbose = 70 - (10*args.verbose) if args.verbose > 0 else 0
+args.verbose = 70 - (10 * args.verbose) if args.verbose > 0 else 0
 logging.basicConfig(level=args.verbose, format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
 if args.mode != 'red':
-  crit_quit('"{}" mode not implemented'.format(args.mode))
+    crit_quit('"{}" mode not implemented'.format(args.mode))
 
 if args.path.is_file():
-  crit_quit('log path invalid: dir expected, got file')
+    crit_quit('log path invalid: dir expected, got file')
 elif not args.path.is_dir():
-  crit_quit('log path invalid')
+    crit_quit('log path invalid')
 
 scanner = threading.Thread(target=log_scan)
 scanner.start()
